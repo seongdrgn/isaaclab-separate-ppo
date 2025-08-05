@@ -1,0 +1,371 @@
+from typing import Any, Mapping, Type, Union
+
+import copy
+
+from skrl import logger
+from ppo.base import Agent
+from skrl.envs.wrappers.torch import MultiAgentEnvWrapper, Wrapper
+from models.base import Model
+from skrl.resources.noises.torch import GaussianNoise, OrnsteinUhlenbeckNoise  # noqa
+from skrl.resources.preprocessors.torch import RunningStandardScaler  # noqa
+from skrl.resources.schedulers.torch import KLAdaptiveLR  # noqa
+from trainers.base import Trainer
+from skrl.utils import set_seed
+
+from models.model import Actor, Critic, MLP
+
+class Runner:
+    def __init__(self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]) -> None:
+        """Experiment runner
+
+        Class that configures and instantiates skrl components to execute training/evaluation workflows in a few lines of code
+
+        :param env: Environment to train on
+        :param cfg: Runner configuration
+        """
+        self._env = env
+        self._cfg = cfg
+
+        # set random seed
+        set_seed(self._cfg.get("seed", None))
+
+        self._cfg["agent"]["rewards_shaper"] = None  # FIXME: avoid 'dictionary changed size during iteration'
+
+        self._models = self._generate_models(self._env, copy.deepcopy(self._cfg))
+        self._agent = self._generate_agent(self._env, copy.deepcopy(self._cfg), self._models)
+        self._trainer = self._generate_trainer(self._env, copy.deepcopy(self._cfg), self._agent)
+
+    @property
+    def trainer(self) -> Trainer:
+        """Trainer instance"""
+        return self._trainer
+
+    @property
+    def agent(self) -> Agent:
+        """Agent instance"""
+        return self._agent
+
+    @staticmethod
+    def load_cfg_from_yaml(path: str) -> dict:
+        """Load a runner configuration from a yaml file
+
+        :param path: File path
+
+        :return: Loaded configuration, or an empty dict if an error has occurred
+        """
+        try:
+            import yaml
+        except Exception as e:
+            logger.error(f"{e}. Install PyYAML with 'pip install pyyaml'")
+            return {}
+
+        try:
+            with open(path) as file:
+                return yaml.safe_load(file)
+        except Exception as e:
+            logger.error(f"Loading yaml error: {e}")
+            return {}
+
+    def _component(self, name: str) -> Type:
+        """Get skrl component (e.g.: agent, trainer, etc..) from string identifier
+
+        :return: skrl component
+        """
+        component = None
+        name = name.lower()
+        # model
+        if name == "gaussianmixin":
+            from skrl.utils.model_instantiators.torch import gaussian_model as component
+        elif name == "categoricalmixin":
+            from skrl.utils.model_instantiators.torch import categorical_model as component
+        elif name == "deterministicmixin":
+            from skrl.utils.model_instantiators.torch import deterministic_model as component
+        elif name == "multivariategaussianmixin":
+            from skrl.utils.model_instantiators.torch import multivariate_gaussian_model as component
+        elif name == "shared":
+            from skrl.utils.model_instantiators.torch import shared_model as component
+        # memory
+        elif name == "randommemory":
+            from skrl.memories.torch import RandomMemory as component
+        # agent
+        elif name in ["privppo", "privppo_default_config"]:
+            from ppo.privppo import PrivPPO, PrivPPO_DEFAULT_CONFIG
+        
+            component = PrivPPO_DEFAULT_CONFIG if "default_config" in name else PrivPPO
+        elif name in ["adaptppo", "adaptppo_default_config"]:
+            from ppo.adaptppo import AdaptPPO, AdaptPPO_DEFAULT_CONFIG
+
+            component = AdaptPPO_DEFAULT_CONFIG if "default_config" in name else AdaptPPO
+        elif name in ["a2c", "a2c_default_config"]:
+            from skrl.agents.torch.a2c import A2C, A2C_DEFAULT_CONFIG
+
+            component = A2C_DEFAULT_CONFIG if "default_config" in name else A2C
+        elif name in ["amp", "amp_default_config"]:
+            from skrl.agents.torch.amp import AMP, AMP_DEFAULT_CONFIG
+
+            component = AMP_DEFAULT_CONFIG if "default_config" in name else AMP
+        elif name in ["cem", "cem_default_config"]:
+            from skrl.agents.torch.cem import CEM, CEM_DEFAULT_CONFIG
+
+            component = CEM_DEFAULT_CONFIG if "default_config" in name else CEM
+        elif name in ["ddpg", "ddpg_default_config"]:
+            from skrl.agents.torch.ddpg import DDPG, DDPG_DEFAULT_CONFIG
+
+            component = DDPG_DEFAULT_CONFIG if "default_config" in name else DDPG
+        elif name in ["ddqn", "ddqn_default_config"]:
+            from skrl.agents.torch.dqn import DDQN, DDQN_DEFAULT_CONFIG
+
+            component = DDQN_DEFAULT_CONFIG if "default_config" in name else DDQN
+        elif name in ["dqn", "dqn_default_config"]:
+            from skrl.agents.torch.dqn import DQN, DQN_DEFAULT_CONFIG
+
+            component = DQN_DEFAULT_CONFIG if "default_config" in name else DQN
+        elif name in ["ppo", "ppo_default_config"]:
+            from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
+
+            component = PPO_DEFAULT_CONFIG if "default_config" in name else PPO
+        elif name in ["rpo", "rpo_default_config"]:
+            from skrl.agents.torch.rpo import RPO, RPO_DEFAULT_CONFIG
+
+            component = RPO_DEFAULT_CONFIG if "default_config" in name else RPO
+        elif name in ["sac", "sac_default_config"]:
+            from skrl.agents.torch.sac import SAC, SAC_DEFAULT_CONFIG
+
+            component = SAC_DEFAULT_CONFIG if "default_config" in name else SAC
+        elif name in ["td3", "td3_default_config"]:
+            from skrl.agents.torch.td3 import TD3, TD3_DEFAULT_CONFIG
+
+            component = TD3_DEFAULT_CONFIG if "default_config" in name else TD3
+        elif name in ["trpo", "trpo_default_config"]:
+            from skrl.agents.torch.trpo import TRPO, TRPO_DEFAULT_CONFIG
+
+            component = TRPO_DEFAULT_CONFIG if "default_config" in name else TRPO
+        # multi-agent
+        elif name in ["ippo", "ippo_default_config"]:
+            from skrl.multi_agents.torch.ippo import IPPO, IPPO_DEFAULT_CONFIG
+
+            component = IPPO_DEFAULT_CONFIG if "default_config" in name else IPPO
+        elif name in ["mappo", "mappo_default_config"]:
+            from skrl.multi_agents.torch.mappo import MAPPO, MAPPO_DEFAULT_CONFIG
+
+            component = MAPPO_DEFAULT_CONFIG if "default_config" in name else MAPPO
+        # trainer
+        elif name == "sequentialtrainer":
+            from trainers.sequential import SequentialTrainer as component
+
+        if component is None:
+            raise ValueError(f"Unknown component '{name}' in runner cfg")
+        return component
+
+    def _process_cfg(self, cfg: dict) -> dict:
+        """Convert simple types to skrl classes/components
+
+        :param cfg: A configuration dictionary
+
+        :return: Updated dictionary
+        """
+        _direct_eval = [
+            "learning_rate_scheduler",
+            "shared_state_preprocessor",
+            "observation_preprocessor",
+            "state_preprocessor",
+            "value_preprocessor",
+            "amp_state_preprocessor",
+            "noise",
+            "smooth_regularization_noise",
+        ]
+
+        def reward_shaper_function(scale):
+            def reward_shaper(rewards, *args, **kwargs):
+                return rewards * scale
+
+            return reward_shaper
+
+        def update_dict(d):
+            for key, value in d.items():
+                if isinstance(value, dict):
+                    update_dict(value)
+                else:
+                    if key in _direct_eval:
+                        if isinstance(value, str):
+                            d[key] = eval(value)
+                    elif key.endswith("_kwargs"):
+                        d[key] = value if value is not None else {}
+                    elif key in ["rewards_shaper_scale"]:
+                        d["rewards_shaper"] = reward_shaper_function(value)
+            return d
+
+        return update_dict(copy.deepcopy(cfg))
+
+    def _generate_models(
+        self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any]
+    ) -> Mapping[str, Mapping[str, Model]]:
+        """Generate model instances according to the environment specification and the given config
+
+        :param env: Wrapped environment
+        :param cfg: A configuration dictionary
+
+        :return: Model instances
+        """
+        multi_agent = isinstance(env, MultiAgentEnvWrapper)
+        device = env.device
+        possible_agents = env.possible_agents if multi_agent else ["agent"]
+        state_spaces = env.state_spaces if multi_agent else {"agent": env.state_space}
+        observation_spaces = env.observation_spaces if multi_agent else {"agent": env.observation_space}
+        action_spaces = env.action_spaces if multi_agent else {"agent": env.action_space}
+
+        agent_class = cfg.get("agent", {}).get("class", "").lower()
+
+        # models
+        # self.policy = self.models.get("policy", None)
+        self.policy = Actor(
+            observation_space=observation_spaces["agent"],
+            state_space=state_spaces["agent"],
+            action_space=action_spaces["agent"],
+            device=device,
+            base_net_units=cfg["models"]["base_network"]["layers"],
+        )
+        self.value = Critic(
+            observation_space=observation_spaces["agent"],
+            state_space=state_spaces["agent"],
+            action_space=action_spaces["agent"],
+            device=device,
+            value_net_units=cfg["models"]["value_network"]["layers"],
+        )
+        self.privileged_net = MLP(units=cfg["models"]["privileged_network"]["layers"],
+                                  input_dim=cfg["models"]["privileged_network"]["input_dim"],
+                                  device=device)
+        # self.value = self.models.get("value", None)
+
+        print("==================================================")
+        print(f"Model (role): Policy")
+        print("==================================================\n")
+        print(self.policy)
+        print("--------------------------------------------------")
+
+        print("==================================================")
+        print(f"Model (role): Value")
+        print("==================================================\n")
+        print(self.value)
+        print("--------------------------------------------------")
+
+        print("==================================================")
+        print(f"Model (role): Privileged Encoder")
+        print("==================================================\n")
+        print(self.privileged_net)
+        print("--------------------------------------------------")
+
+        models = {"agent":{"policy": self.policy, "value": self.value, "privileged_net": self.privileged_net}}
+
+        return models
+
+    def _generate_agent(
+        self,
+        env: Union[Wrapper, MultiAgentEnvWrapper],
+        cfg: Mapping[str, Any],
+        models: Mapping[str, Mapping[str, Model]],
+    ) -> Agent:
+        """Generate agent instance according to the environment specification and the given config and models
+
+        :param env: Wrapped environment
+        :param cfg: A configuration dictionary
+        :param models: Agent's model instances
+
+        :return: Agent instances
+        """
+        multi_agent = isinstance(env, MultiAgentEnvWrapper)
+        device = env.device
+        num_envs = env.num_envs
+        possible_agents = env.possible_agents if multi_agent else ["agent"]
+        state_spaces = env.state_spaces if multi_agent else {"agent": env.state_space}
+        observation_spaces = env.observation_spaces if multi_agent else {"agent": env.observation_space}
+        action_spaces = env.action_spaces if multi_agent else {"agent": env.action_space}
+
+        agent_class = cfg.get("agent", {}).get("class", "").lower()
+        if not agent_class:
+            raise ValueError(f"No 'class' field defined in 'agent' cfg")
+
+        # check for memory configuration (backward compatibility)
+        if not "memory" in cfg:
+            logger.warning(
+                "Deprecation warning: No 'memory' field defined in cfg. Using the default generated configuration"
+            )
+            cfg["memory"] = {"class": "RandomMemory", "memory_size": -1}
+        # get memory class and remove 'class' field
+        try:
+            memory_class = self._component(cfg["memory"]["class"])
+            del cfg["memory"]["class"]
+        except KeyError:
+            memory_class = self._component("RandomMemory")
+            logger.warning("No 'class' field defined in 'memory' cfg. 'RandomMemory' will be used as default")
+        memories = {}
+        # instantiate memory
+        if cfg["memory"]["memory_size"] < 0:
+            cfg["memory"]["memory_size"] = cfg["agent"]["rollouts"]  # memory_size is the agent's number of rollouts
+        for agent_id in possible_agents:
+            memories[agent_id] = memory_class(num_envs=num_envs, device=device, **self._process_cfg(cfg["memory"]))
+
+        # single-agent configuration and instantiation
+        if agent_class in ["privppo","adaptppo"]:
+            agent_id = possible_agents[0]
+            agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
+            agent_cfg.update(self._process_cfg(cfg["agent"]))
+            agent_cfg.get("state_preprocessor_kwargs", {}).update(
+                {"size": state_spaces[agent_id], "device": device}
+            )
+            agent_cfg.get("observation_preprocessor_kwargs", {}).update(
+                {"size": observation_spaces[agent_id], "device": device}
+            )
+            agent_cfg.get("value_preprocessor_kwargs", {}).update({"size": 1, "device": device})
+            if agent_cfg.get("exploration", {}).get("noise", None):
+                agent_cfg["exploration"]["noise"] = agent_cfg["exploration"]["noise"](
+                    **agent_cfg["exploration"].get("noise_kwargs", {})
+                )
+            if agent_cfg.get("smooth_regularization_noise", None):
+                agent_cfg["smooth_regularization_noise"] = agent_cfg["smooth_regularization_noise"](
+                    **agent_cfg.get("smooth_regularization_noise_kwargs", {})
+                )
+            agent_kwargs = {
+                "models": models[agent_id],
+                "memory": memories[agent_id],
+                "observation_space": observation_spaces[agent_id],
+                "state_space": state_spaces[agent_id],
+                "action_space": action_spaces[agent_id],
+            }
+
+        return self._component(agent_class)(cfg=agent_cfg, device=device, **agent_kwargs)
+
+    def _generate_trainer(
+        self, env: Union[Wrapper, MultiAgentEnvWrapper], cfg: Mapping[str, Any], agent: Agent
+    ) -> Trainer:
+        """Generate trainer instance according to the environment specification and the given config and agent
+
+        :param env: Wrapped environment
+        :param cfg: A configuration dictionary
+        :param agent: Agent's model instances
+
+        :return: Trainer instances
+        """
+        # get trainer class and remove 'class' field
+        try:
+            trainer_class = self._component(cfg["trainer"]["class"])
+            del cfg["trainer"]["class"]
+        except KeyError:
+            trainer_class = self._component("SequentialTrainer")
+            logger.warning("No 'class' field defined in 'trainer' cfg. 'SequentialTrainer' will be used as default")
+        # instantiate trainer
+        return trainer_class(env=env, agents=agent, cfg=cfg["trainer"])
+
+    def run(self, mode: str = "train") -> None:
+        """Run the training/evaluation
+
+        :param mode: Running mode: ``"train"`` for training or ``"eval"`` for evaluation (default: ``"train"``)
+
+        :raises ValueError: The specified running mode is not valid
+        """
+        if mode == "train":
+            self._trainer.train()
+        elif mode == "eval":
+            self._trainer.eval()
+        else:
+            raise ValueError(f"Unknown running mode: {mode}")
