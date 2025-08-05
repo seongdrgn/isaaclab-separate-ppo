@@ -1,1 +1,3 @@
-# isaaclab-separate-ppo
+# Separate PPO (Split observation & state)
+
+
